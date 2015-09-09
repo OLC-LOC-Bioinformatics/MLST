@@ -33,15 +33,16 @@ parser.add_argument('-p', '--path', required=True,
                     help='Specify path for custom folder locations. If you don\'t supply additional paths'
                          'e.g. sequencePath, allelePath, or organismPath, then the program will look for '
                          'MLST files in .../path/Organism, and the query sequences in ../path/sequences')
-parser.add_argument('-c', '--cutoff', required=False, default=100,
-                    help='The percent identity cutoff value for BLAST matches. Default is 100%)')
+parser.add_argument('-c', '--cutoff', required=False, default=98,
+                    help='The percent identity cutoff value for BLAST matches. Default is 98%)')
 parser.add_argument('-s', '--sequencePath', required=False,
                     default='/home/blais/PycharmProjects/MLST/sequences',
                     help='The location of the query sequence files')
 parser.add_argument('-a', '--alleleProfilePath', required=False,
                     # default='/home/blais/PycharmProjects/pythonGeneSeekr/Organism/Salmonella/cgMLST',
                     help='The path of the folder containing the two folders containing '
-                         'the allele files, and the profile file e.g. /path/to/folder/Organism/Salmonella/cgMLST')
+                         'the allele files, and the profile file e.g. /path/to/folder/Organism/Salmonella/cgMLST'
+                         'Please note the requirements for the profile database in the readme')
 parser.add_argument('-O', '--organismPath', required=False,
                     help='The path of the folder containing the organism folders e.g. /path/to/folder/Organism')
 parser.add_argument('-o', '--organism', required=False,
@@ -51,11 +52,15 @@ parser.add_argument('-S', '--scheme', required=False,
                     help='The scheme you wish to use. Must match the folder name containing the scheme e.g. cgMLST.'
                          'Furthermore, this folder must contain two folders: "alleles" and "profile". The alleles '
                          'folder contains the allele files in .fasta format, and the profile folder contains '
-                         'the profile in .txt format.')
+                         'the profile in .txt format. Please note the requirements for the profile in the readme')
 parser.add_argument('-u', '--updateProfileFalse', required=False, default=True,
                     help='By default, the program automatically creates new sequence profiles and appends these '
                          'profiles to the profile file. If, instead, you wish to wish to see the closest match of a '
                          'query genome to known reference profiles, set this to False.')
+parser.add_argument('-U', '--updateAlleleFalse', required=False, default=True,
+                    help='By default, the program automatically creates new allels and appends these '
+                         'alleles to the appropriate file. If, instead, you wish to wish to see the closest match of a '
+                         'query genome to known reference alleles, set this to False.')
 
 # Get the arguments into a list
 args = vars(parser.parse_args())
@@ -79,10 +84,13 @@ else:
 scheme = args['scheme']
 organism = args['organism']
 updateProfile = args['updateProfileFalse']
+updateAllele = args['updateAlleleFalse']
 
-# Empty the updateProfile if it is not True - will be used in if checks later
+# Empty the updateProfile and/or updateAllele if they are not True - will be used in if checks later
 if updateProfile != True:
     updateProfile = ""
+if updateAllele != True:
+    updateAllele = ""
 
 
 def make_path(inPath):
@@ -124,7 +132,6 @@ def makeblastdb(dqueue):
         # remove the path and the file extension for easier future globbing
         db = fastapath.split(".")[0]
         nhr = "%s.nhr" % db  # add nhr for searching
-        # print nhr
         FNULL = open(os.devnull, 'w')  # define /dev/null
         if not os.path.isfile(str(nhr)):  # if check for already existing dbs
             subprocess.Popen(shlex.split("makeblastdb -in %s -dbtype nucl -out %s" % (fastapath, db)), stdout=FNULL, stderr=FNULL)
@@ -215,6 +222,7 @@ def blastparse(blast_handle, genome, gene, cutoff, genepath):
     """Parses BLAST results, and populates a dictionary with the results"""
     global plusdict
     global profileData
+    global updateAllele
     snpDict = {}
     dataDict = {}
     records = NCBIXML.parse(blast_handle)   # Open record from memory-mapped file
@@ -236,8 +244,8 @@ def blastparse(blast_handle, genome, gene, cutoff, genepath):
                     # Calculate the percent identity
                     percentIdentity = "%.2f" % float(float(hsp.identities) / float(alignment.length) * 100)
                     allele = str(alignment.title.split(" ")[-1])
-                    # If the results are greater than the cutoff value, add them to the dictionary
-                    if hsp.identities >= alignment.length * cutoff:
+                    # If the results are 100% identical to the reference allele, add them to the dictionary
+                    if hsp.identities >= alignment.length:
                         # Clears out any "N" values in the dictionary
                         if "N" in plusdict[genomeName][gene]:
                            plusdict[genomeName][gene].clear()
@@ -245,30 +253,33 @@ def blastparse(blast_handle, genome, gene, cutoff, genepath):
                         # As the blast results files are not sorted by percent identity, and, at least for rMLST
                         # genes, not all genes are the same length, a match can occur after lots of close matches
                         snpDict.clear()
-                    # Process results if the percent identity is 98-99.9% and there is no 100% match in the dictionary
-                    # elif not gene in plusdict[genomeName] and hsp.identities >= alignment.length * cutoff * 0.98:
-                    elif not gene in plusdict[genomeName] and not snpDict and hsp.identities >= alignment.length * cutoff * 0.98:
-                        # Puts the HSP in the correct order -  hits to the negative strand will be
-                        # reversed compared to what we're looking for
-                        if hsp.sbjct_start < hsp.sbjct_end:
-                            end = hsp.sbjct_end
+                    # Optionally process results if the percent identity is cutoff-99.9% and there is no 100% match in the dictionary
+                    elif not gene in plusdict[genomeName] and not snpDict and hsp.identities >= alignment.length * cutoff:
+                        if updateAllele:
+                            # Puts the HSP in the correct order -  hits to the negative strand will be
+                            # reversed compared to what we're looking for
+                            if hsp.sbjct_start < hsp.sbjct_end:
+                                end = hsp.sbjct_end
+                            else:
+                                end = hsp.sbjct_start
+                            # Screen out hits that are shorter than the targets
+                            # Keeping it this format even though this if statement could be re-written more efficiently
+                            if end < alignment.length:
+                                pass
+                            else:
+                                # Add the details of the mismatching allele to two dictionaries to be processed below
+                                snpDict[genepath] = hsp.query
+                                dataDict[genomeName] = gene
+                        # If alleles aren't being updated, add the allele and the percent identity match to the reference allele
                         else:
-                            end = hsp.sbjct_start
-                        # Screen out hits that are shorter than the targets
-                        # Keeping it this format even though this if statement could be re-written more efficiently
-                        if end < alignment.length:
-                            pass
-                        else:
-                            # Add the details of the mismatching allele to two dictionaries to be processed below
-                            snpDict[genepath] = hsp.query
-                            dataDict[genomeName] = gene
+                            plusdict[genomeName][gene][allele] = percentIdentity
                     # If the percent identity is below the 98% cutoff threshold or is the hsp is too short
                     elif not gene in plusdict[genomeName] and not snpDict:
                         plusdict[genomeName][gene]["N"] = 0
     # If there are no records, populate the dictionary with "N" and a 0% identity
     else:
         plusdict[genomeName][gene]["N"] = 0
-    # Add matches that are 98.0 < match identity < 99.9 and the same length of the target to the allele file
+    # Add matches that are cutoff < match identity < 99.9% and the same length of the target to the allele file
     if snpDict:
         # Initialise some variables
         alleleNames = []  # The allele names already in the allele file
@@ -318,15 +329,6 @@ def blastparse(blast_handle, genome, gene, cutoff, genepath):
             # Remake the database files
             updatedb = [gPath]
             makedbthreads(updatedb)
-
-            # # Try to remove all the appropriate files
-            # try:
-            #     os.remove("%s.nhr" % baseName)
-            #     os.remove("%s.nin" % baseName)
-            #     os.remove("%s.nsq" % baseName)
-            #
-            # except OSError:
-            #     raise
             # Now use this new allele in populating plusdict
             for updatedGenome in dataDict:
                 # The percent identity has to be 100% - this allele matches itself
@@ -804,7 +806,13 @@ def blaster(path, cutoff, sequencePath, targetPath, organismPath, scheme, organi
                             for gene in geneList:
                                 # Add each allele to the result string
                                 for allele in resultProfile[genome][sequenceType][numMatches][gene]:
-                                    resultString += "%s," % allele
+                                    # If there is a 100% match or a 0% match (in case of an N), do not print the percent identity
+                                    if float(resultProfile[genome][sequenceType][numMatches][gene][allele]) == 100 \
+                                            or float(resultProfile[genome][sequenceType][numMatches][gene][allele]) == 0:
+                                        resultString += "%s," % allele
+                                    # Otherwise add the percent identity following the allele
+                                    else:
+                                        resultString += "%s (%s%%)," % (allele, resultProfile[genome][sequenceType][numMatches][gene][allele])
                     # Append the resultString to the report
                     csvfile.write(resultString)
                 # If there are more than one identical profile
@@ -818,7 +826,11 @@ def blaster(path, cutoff, sequencePath, targetPath, organismPath, scheme, organi
                                 resultString += "%s," % numMatches
                                 for gene in geneList:
                                     for allele in resultProfile[genome][sequenceType][numMatches][gene]:
-                                        resultString += "%s," % allele
+                                        if float(resultProfile[genome][sequenceType][numMatches][gene][allele]) == 100 \
+                                                or float(resultProfile[genome][sequenceType][numMatches][gene][allele]) == 0:
+                                            resultString += "%s," % allele
+                                        else:
+                                            resultString += "%s (%s%%)," % (allele, resultProfile[genome][sequenceType][numMatches][gene][allele])
                             resProfileCount += 1
                             csvfile.write(resultString)
                         # Subsequent sequence types
@@ -829,7 +841,11 @@ def blaster(path, cutoff, sequencePath, targetPath, organismPath, scheme, organi
                                 resultString += "%s," % numMatches
                                 for gene in geneList:
                                     for allele in resultProfile[genome][sequenceType][numMatches][gene]:
-                                        resultString += "%s," % allele
+                                        if float(resultProfile[genome][sequenceType][numMatches][gene][allele]) == 100 \
+                                                or float(resultProfile[genome][sequenceType][numMatches][gene][allele]) == 0:
+                                            resultString += "%s," % allele
+                                        else:
+                                            resultString += "%s (%s%%)," % (allele, resultProfile[genome][sequenceType][numMatches][gene][allele])
                             resProfileCount += 1
                             csvfile.write(resultString)
             # The option to not update the profiles is optionally available, so do the same as above, but for genomes
@@ -846,10 +862,14 @@ def blaster(path, cutoff, sequencePath, targetPath, organismPath, scheme, organi
                                 for allele in MLSTseqType[genome][sequenceType][numMatches][gene]:
                                     for refAllele in MLSTseqType[genome][sequenceType][numMatches][gene][allele]:
                                         if allele == refAllele:
-                                            resultString += "%s," % allele
+                                            if float(MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele]) == 100 \
+                                                    or float(MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele]) == 0:
+                                                resultString += "%s," % allele
+                                            else:
+                                                resultString += "%s (%s%%)," % (allele, MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele])
                                         # Since there are mismatches, show the expected allele in the reference profile
                                         else:
-                                            resultString += "%s (%s)," % (allele, refAllele)
+                                            resultString += "%s (%s - %s%%)," % (allele, refAllele, MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele])
                     csvfile.write(resultString)
                 else:
                     for sequenceType in MLSTseqType[genome]:
@@ -861,9 +881,14 @@ def blaster(path, cutoff, sequencePath, targetPath, organismPath, scheme, organi
                                     for allele in MLSTseqType[genome][sequenceType][numMatches][gene]:
                                         for refAllele in MLSTseqType[genome][sequenceType][numMatches][gene][allele]:
                                             if allele == refAllele:
-                                                resultString += "%s," % allele
+                                                if float(MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele]) == 100 \
+                                                        or float(MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele]) == 0:
+                                                    resultString += "%s," % allele
+                                                else:
+                                                    resultString += "%s (%s%%)," % (allele, MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele])
                                             else:
-                                                resultString += "%s (%s)," % (allele, refAllele)
+                                                resultString += "%s (%s - %s%%)," % (allele, refAllele, MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele])
+
                             sequenceTypeCount += 1
                             csvfile.write(resultString)
                         else:
@@ -875,12 +900,15 @@ def blaster(path, cutoff, sequencePath, targetPath, organismPath, scheme, organi
                                     for allele in MLSTseqType[genome][sequenceType][numMatches][gene]:
                                         for refAllele in MLSTseqType[genome][sequenceType][numMatches][gene][allele]:
                                             if allele == refAllele:
-                                                resultString += "%s," % allele
+                                                if float(MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele]) == 100 \
+                                                        or float(MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele]) == 0:
+                                                    resultString += "%s," % allele
+                                                else:
+                                                    resultString += "%s (%s%%)," % (allele, MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele])
                                             else:
-                                                resultString += "%s (%s)," % (allele, refAllele)
+                                                resultString += "%s (%s - %s%%)," % (allele, refAllele, MLSTseqType[genome][sequenceType][numMatches][gene][allele][refAllele])
                             sequenceTypeCount += 1
                             csvfile.write(resultString)
-
     # File cleanup
     tmpFiles = glob("%stmp/*" % path)
     for tmpFile in tmpFiles:
